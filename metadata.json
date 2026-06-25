@@ -1,5 +1,5 @@
 {
-  "name": "Aged Care Smart Compliant System",
+  "name": "Aged Care Compliance Copilot",
   "description": "A responsive PWA web app for an aged care facility in Australia with Gemini-powered AI observations and SIRS reporting.",
   "requestFramePermissions": [
     "camera",

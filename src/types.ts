@@ -1,7 +1,16 @@
-export type HealthStatus = 'green' | 'yellow' | 'red';
-export type BathStatus = 'done' | 'due' | 'overdue';
-export type MealStatus = 'eaten' | 'missed' | 'assisted';
-export type ToiletStatus = 'independent' | 'assisted' | 'pad-change';
+export type UserRole = "caregiver" | "rn" | "manager" | "admin";
+
+export interface UserProfile {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  role: UserRole;
+}
+
+export type HealthStatus = "green" | "yellow" | "red";
+export type BathStatus = "done" | "due" | "overdue";
+export type MealStatus = "eaten" | "missed" | "assisted";
+export type ToiletStatus = "independent" | "assisted" | "pad-change";
 
 export interface Resident {
   id: string;
@@ -14,16 +23,19 @@ export interface Resident {
   toiletStatus: ToiletStatus;
   careMinutesToday: number;
   careMinutesTarget: number;
+  allergies?: string[];
+  medicalHistory?: string[];
 }
 
 export interface AIObservationResult {
-  observationType?: 'wound' | 'excrement';
+  observationType?: "wound" | "excrement";
   observation: string;
   estimatedSizeOrType?: string;
   colour?: string;
   bristolStoolType?: string;
   potentialRiskFlag: string;
   bodyLocation?: string;
+  suggestedCarePlan?: string;
 }
 
 export interface SIRSReport {
@@ -39,6 +51,8 @@ export interface SIRSReport {
     regulatorNotification: string;
     preventiveActions: string;
   };
+  confidenceScore?: number;
+  uncertaintyFlag?: string;
 }
 
 export interface SIRSAlertData {
