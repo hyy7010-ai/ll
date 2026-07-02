@@ -1,0 +1,8 @@
+{
+  "firestore": [
+    {
+      "database": "ai-studio-agedcaresmartcom-591974f6-bb77-43c0-83ba-7a553c1712ab",
+      "rules": "firestore.rules"
+    }
+  ]
+}

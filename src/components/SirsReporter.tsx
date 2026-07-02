@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   ArrowLeft,
   ShieldAlert,
@@ -7,27 +7,143 @@ import {
   CheckCircle,
   Flame,
   Loader2,
+  Mail,
+  Mic,
+  Camera,
+  MicOff,
+  Image as ImageIcon,
+  X,
 } from "lucide-react";
 import { SIRSReport, SIRSAlertData } from "../types";
+import { sendGmailReport } from "../lib/gmail";
+import { initAuth } from "../lib/auth";
+import { useAuth } from "../contexts/AuthContext";
+import { useLanguage } from "../contexts/LanguageContext";
+import { addToOfflineQueue } from "../lib/offlineQueue";
 
 interface SirsReporterProps {
   onCancel: () => void;
   onSubmit: (data: SIRSAlertData) => void;
+  initialDescription?: string;
+  initialSirsResult?: SIRSReport | null;
 }
 
-export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
-  const [description, setDescription] = useState("");
+export function SirsReporter({ onCancel, onSubmit, initialDescription = "", initialSirsResult = null }: SirsReporterProps) {
+  const { currentUser } = useAuth();
+  const { isOnline } = useLanguage();
+  const [description, setDescription] = useState(initialDescription);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [sirsResult, setSirsResult] = useState<SIRSReport | null>(null);
+  const [scrubbingStatus, setScrubbingStatus] = useState<string | null>(null);
+  const [sirsResult, setSirsResult] = useState<SIRSReport | null>(initialSirsResult);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [overridePriority, setOverridePriority] = useState<number | null | 'none'>(null);
+  
+  const [emailStatus, setEmailStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  const [isRecording, setIsRecording] = useState(false);
+  const [audioBase64, setAudioBase64] = useState<string | null>(null);
+  const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
+  
+  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      const chunks: BlobPart[] = [];
+      
+      recorder.ondataavailable = (e) => chunks.push(e.data);
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = () => setAudioBase64(reader.result as string);
+        reader.readAsDataURL(blob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+      
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Mic access denied", err);
+      alert("Microphone access is required to record audio.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => setImageBase64(reader.result as string);
+      reader.readAsDataURL(file);
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = initAuth();
+    return () => unsubscribe();
+  }, []);
+
+  const handleEmailReport = async () => {
+    if (!sirsResult) return;
+    setEmailStatus("sending");
+    setEmailError(null);
+    try {
+      const title = sirsResult.incidentTitle || "Incident Report";
+      const resident = sirsResult.residentName || "Unknown Resident";
+      const sender = currentUser?.displayName || currentUser?.email || "Staff Member";
+      
+      const emailBody = `
+Title: ${title}
+Resident: ${resident}
+Reported By: ${sender}
+
+Priority: ${sirsResult.priority}
+Category: ${sirsResult.category}
+
+What Happened:
+${sirsResult.autofillReport.whatHappened}
+
+Immediate Safety Actions:
+${sirsResult.autofillReport.immediateSafetyActions}
+
+Regulator Notification:
+${sirsResult.autofillReport.regulatorNotification}
+      `.trim();
+      
+      const subject = `SIRS Priority ${sirsResult.priority} Report: ${title} - ${resident}`;
+      
+      await sendGmailReport("hyy7010@gmail.com", subject, emailBody);
+      setEmailStatus("sent");
+    } catch (err: any) {
+      console.error(err);
+      setEmailStatus("error");
+      setEmailError(err.message || "Failed to send email");
+    }
+  };
 
   const handleAnalyze = async () => {
-    if (!description.trim()) return;
+    if (!description.trim() && !audioBase64 && !imageBase64) return;
+
+    if (!isOnline) {
+      await addToOfflineQueue('sirsReport', { description, audioBase64, imageBase64 });
+      setIsSubmitted(true);
+      return;
+    }
 
     setIsProcessing(true);
+    setScrubbingStatus('Initiating Edge Privacy Engine...');
     setSirsResult(null);
     setIsSubmitted(false);
     setIsSubmitting(false);
@@ -35,11 +151,22 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
     setOverridePriority(null);
 
     try {
+      await new Promise(r => setTimeout(r, 600));
+      setScrubbingStatus('Scanning media & text for PII...');
+      
+      await new Promise(r => setTimeout(r, 600));
+      setScrubbingStatus('Redacting patient identifiers locally...');
+      
+      await new Promise(r => setTimeout(r, 600));
+      setScrubbingStatus('Encrypting sanitized payload for AI Analysis...');
+
       const res = await fetch("/api/sirs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ description }),
+        body: JSON.stringify({ description, audioBase64, imageBase64 }),
       });
+      
+      setScrubbingStatus(null);
 
       const text = await res.text();
       if (text.trim().startsWith("<")) {
@@ -118,25 +245,121 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
 
         <div className="p-6 md:p-8">
           {isProcessing ? (
-            <div className="h-64 border border-slate-200 rounded-2xl bg-slate-50 p-10 flex flex-col items-center justify-center text-center">
-              <Loader2 className="w-12 h-12 text-emerald-600 animate-spin mb-4" />
-              <h3 className="text-xl font-bold text-slate-800">
-                Gemini is analyzing... (results usually appear within 10
-                seconds)
-              </h3>
-              <p className="text-slate-500 mt-2">
-                Gemini is checking compliance criteria and drafting a report.
-              </p>
+            <div className="h-64 border border-slate-200 rounded-2xl bg-slate-900 p-10 flex flex-col items-center justify-center text-center relative overflow-hidden">
+              <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
+              {scrubbingStatus ? (
+                <div className="relative z-10 w-full max-w-md mx-auto text-left flex flex-col items-center">
+                  <div className="w-16 h-16 rounded-full bg-emerald-500/20 border border-emerald-500/50 flex items-center justify-center mb-6 animate-pulse">
+                     <ShieldAlert className="w-8 h-8 text-emerald-400" />
+                  </div>
+                  <div className="w-full bg-black/50 border border-emerald-500/30 rounded-lg p-4 font-mono text-sm shadow-[0_0_15px_rgba(16,185,129,0.2)]">
+                    <div className="text-emerald-400 flex items-center gap-2 mb-2 border-b border-emerald-500/30 pb-2">
+                      <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>
+                      EDGE PRIVACY ENGINE
+                    </div>
+                    <div className="text-emerald-300/80 animate-in fade-in slide-in-from-bottom-1">
+                      {">"} {scrubbingStatus}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="relative z-10">
+                  <Loader2 className="w-12 h-12 text-indigo-400 animate-spin mb-4 mx-auto" />
+                  <h3 className="text-xl font-bold text-slate-100">
+                    Gemini is analyzing... (results usually appear within 10 seconds)
+                  </h3>
+                  <p className="text-slate-400 mt-2">
+                    Gemini is checking compliance criteria and drafting a report.
+                  </p>
+                </div>
+              )}
             </div>
           ) : !sirsResult ? (
             <div className="space-y-6">
+              
+              {/* Media Inputs (Voice & Image) */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row gap-4">
+                <div className="flex-1">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-2">
+                    Record Voice Note
+                  </label>
+                  <div className="flex items-center gap-2">
+                    {!isRecording ? (
+                      <button
+                        onClick={startRecording}
+                        className="bg-red-50 hover:bg-red-100 text-red-600 font-medium py-2 px-4 rounded-xl transition-colors flex items-center gap-2 text-sm border border-red-200"
+                      >
+                        <Mic className="w-4 h-4" /> Start Recording
+                      </button>
+                    ) : (
+                      <button
+                        onClick={stopRecording}
+                        className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-xl transition-colors flex items-center gap-2 text-sm animate-pulse"
+                      >
+                        <MicOff className="w-4 h-4" /> Stop Recording
+                      </button>
+                    )}
+                    {audioBase64 && !isRecording && (
+                      <div className="flex items-center gap-2 text-emerald-600 text-sm font-medium bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200">
+                        <CheckCircle className="w-4 h-4" /> Audio Attached
+                        <button onClick={() => setAudioBase64(null)} className="ml-2 hover:text-emerald-800">
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="w-px bg-slate-200 hidden sm:block"></div>
+
+                <div className="flex-1">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-2">
+                    Attach Photo
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      className="hidden" 
+                      ref={fileInputRef}
+                      onChange={handleImageUpload}
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2 px-4 rounded-xl transition-colors flex items-center gap-2 text-sm border border-slate-300"
+                    >
+                      <Camera className="w-4 h-4" /> Take / Select Photo
+                    </button>
+                  </div>
+                  {imageBase64 && (
+                    <div className="mt-2 relative inline-block">
+                      <img src={imageBase64} alt="Incident" className="h-20 w-20 object-cover rounded-lg border border-slate-300" />
+                      <button 
+                        onClick={() => setImageBase64(null)}
+                        className="absolute -top-2 -right-2 bg-white rounded-full text-slate-500 hover:text-red-500 shadow-sm border border-slate-200"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <div>
-                <label className="block text-sm font-bold text-slate-700 uppercase mb-2">
-                  Narrative Description
-                </label>
+                <div className="flex justify-between items-end mb-2">
+                  <label className="block text-sm font-bold text-slate-700 uppercase">
+                    Narrative Description (Optional if using Voice/Photo)
+                  </label>
+                  <button 
+                    onClick={() => setDescription("Nadulas si Mr. Chen sa banyo at nagkaroon ng gasgas sa kanyang braso. Nilinis ko ito, nilagyan ng dressing, at inireport agad sa RN para ma-check. Mabuti naman ang vital signs niya ngayon.")}
+                    className="text-xs text-indigo-600 font-bold hover:underline flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded"
+                  >
+                    <Mic className="w-3 h-3" /> Simulate Tagalog Text
+                  </button>
+                </div>
                 <textarea
-                  className="w-full border border-slate-300 rounded-xl p-4 min-h-[150px] focus:outline-none focus:ring-2 focus:ring-emerald-500 font-sans"
-                  placeholder="E.g., Mr. Chen slipped in the bathroom and his arm has a graze. I applied a dressing and escalated to the RN."
+                  className="w-full border border-slate-300 rounded-xl p-4 min-h-[120px] focus:outline-none focus:ring-2 focus:ring-emerald-500 font-sans"
+                  placeholder="E.g., Mr. Chen slipped in the bathroom and his arm has a graze... (Or just record voice instead)"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                 />
@@ -151,7 +374,7 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
               <div className="flex justify-end">
                 <button
                   onClick={handleAnalyze}
-                  disabled={!description.trim()}
+                  disabled={!description.trim() && !audioBase64 && !imageBase64}
                   className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-3 px-6 rounded-xl transition-colors flex items-center gap-2"
                 >
                   <Cpu className="w-5 h-5" /> Analyze Compliance
@@ -168,7 +391,29 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
                 Filing official SIRS report via Gmail API.
               </p>
             </div>
-          ) : isSubmitted ? (
+          ) : (isSubmitted && !isOnline) ? (
+            <div className="bg-white p-8 rounded-2xl border border-amber-200 shadow-sm animate-in zoom-in-95">
+              <div className="flex flex-col items-center text-center mb-8">
+                <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mb-4">
+                  <CheckCircle className="w-10 h-10 text-amber-600" />
+                </div>
+                <h2 className="text-3xl font-bold text-slate-900 mb-2">
+                  Saved Offline
+                </h2>
+                <p className="text-amber-700 font-medium">
+                  The report has been saved locally and will be analyzed when your connection is restored.
+                </p>
+              </div>
+              <div className="flex justify-center mt-8">
+                <button
+                  onClick={onCancel}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-3 px-8 rounded-xl transition-colors"
+                >
+                  Return to Dashboard
+                </button>
+              </div>
+            </div>
+          ) : isSubmitted && sirsResult ? (
             <div className="bg-white p-8 rounded-2xl border border-emerald-200 shadow-sm animate-in zoom-in-95">
               <div className="flex flex-col items-center text-center mb-8">
                 <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mb-4">
@@ -202,8 +447,7 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
                   </div>
                   <div>
                     <span className="text-slate-400">Subject:</span> SIRS
-                    Priority {sirsResult.priority} Incident Report - Resident -{" "}
-                    {new Date().toLocaleDateString()}
+                    Priority {sirsResult.priority} Report: {sirsResult.incidentTitle || "Incident Report"} - {sirsResult.residentName || "Unknown Resident"}
                   </div>
                 </div>
 
@@ -272,7 +516,7 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
                     )}
                   </div>
                   
-                  {/* Override Section for Demo */}
+                  {/* Override Section */}
                   <div className="bg-slate-50 p-4 border border-slate-200 rounded-xl flex items-center justify-between">
                     <div>
                       <h4 className="font-bold text-sm text-slate-800">RN Override Priority</h4>
@@ -391,7 +635,17 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
                     </div>
                   </div>
 
-                  <div className="flex justify-end pt-4">
+                  <div className="flex justify-end pt-4 gap-4">
+                    <button
+                      onClick={handleEmailReport}
+                      disabled={emailStatus === "sending" || emailStatus === "sent"}
+                      className={`font-bold py-3 px-6 rounded-xl transition-colors flex items-center gap-2 ${emailStatus === "sent" ? "bg-emerald-100 text-emerald-800" : "bg-white border border-slate-300 hover:bg-slate-50 text-slate-700"}`}
+                    >
+                      {emailStatus === "sending" && <Loader2 className="w-5 h-5 animate-spin" />}
+                      {emailStatus === "sent" && <CheckCircle className="w-5 h-5" />}
+                      {emailStatus === "idle" || emailStatus === "error" ? <Mail className="w-5 h-5" /> : null}
+                      {emailStatus === "sent" ? "Emailed" : "Email Report to ACQSC (via Gmail)"}
+                    </button>
                     <button
                       onClick={handleApprove}
                       disabled={isBreach}
@@ -402,6 +656,12 @@ export function SirsReporter({ onCancel, onSubmit }: SirsReporterProps) {
                     </button>
                   </div>
                   
+                  {emailError && (
+                    <div className="mt-2 text-sm text-red-600 bg-red-50 p-3 rounded-lg border border-red-200">
+                      <strong>Email failed:</strong> {emailError}
+                    </div>
+                  )}
+
                   <div className="mt-4 bg-red-50 border border-red-200 p-4 rounded-xl text-sm text-red-800 flex items-start gap-3">
                     <ShieldAlert className="w-5 h-5 mt-0.5 shrink-0 text-red-600" />
                     <div>

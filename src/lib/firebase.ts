@@ -4,17 +4,7 @@ import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import appletConfig from "../../firebase-applet-config.json";
 
 // Initialize using environment variables if provided, otherwise fallback to applet config
-const firebaseConfig = import.meta.env.VITE_FIREBASE_API_KEY
-  ? {
-      apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-      appId: import.meta.env.VITE_FIREBASE_APP_ID,
-      firestoreDatabaseId: import.meta.env.VITE_FIREBASE_DATABASE_ID,
-    }
-  : appletConfig;
+const firebaseConfig = appletConfig;
 
 let app;
 try {
@@ -29,6 +19,7 @@ let auth: any;
 try {
   // Pass databaseId if using appletConfig fallback
   const dbId = (firebaseConfig as any).firestoreDatabaseId || "(default)";
+  console.log("Initializing Firestore with dbId:", dbId);
   db = getFirestore(app, dbId);
   auth = getAuth(app);
 } catch (e) {

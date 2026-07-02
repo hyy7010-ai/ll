@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from "react";
-import { ShieldAlert, Activity, Users, Bell, LogOut, Loader2, FileText, X, Globe, WifiOff } from "lucide-react";
+import { ShieldAlert, Activity, Users, Bell, LogOut, Loader2, FileText, X, Globe, WifiOff, ArrowRight } from "lucide-react";
 import { Dashboard } from "./Dashboard";
 import { ResidentProfile } from "./ResidentProfile";
 import { SirsReporter } from "./SirsReporter";
 import { RosterComplianceGuard } from "./RosterComplianceGuard";
 import { RNReviewList } from "./RNReviewList";
 import { StaffManager } from "./StaffManager";
+import { AdminDashboard } from "./AdminDashboard";
+import { SirsReviewDashboard } from "./SirsReviewDashboard";
+import { FamilyDashboard } from "./FamilyDashboard";
 import { useLanguage } from "../contexts/LanguageContext";
 import {
   SIRSAlertData,
@@ -20,17 +23,22 @@ import {
   onSnapshot,
   addDoc,
   deleteDoc,
+  updateDoc,
   doc,
   serverTimestamp,
+  query,
+  orderBy,
+  limit
 } from "firebase/firestore";
 import { seedDatabaseIfNeeded } from "../lib/seed";
 import { useAuth } from "../contexts/AuthContext";
+import { getOfflineQueue, removeQueueItem } from "../lib/offlineQueue";
 
 export const DashboardContainer: React.FC = () => {
   const { userProfile, logout } = useAuth();
-  const { lang, setLang, t, isOnline } = useLanguage();
+  const { lang, setLang, t, isOnline, toggleSimulateOffline } = useLanguage();
   const [currentScreen, setCurrentScreen] = useState<
-    "dashboard" | "profile" | "sirs" | "roster" | "rnReview" | "staff"
+    "dashboard" | "profile" | "sirs" | "roster" | "rnReview" | "staff" | "admin" | "sirsReview"
   >("dashboard");
   const [selectedResidentId, setSelectedResidentId] = useState<string | null>(
     null,
@@ -44,10 +52,95 @@ export const DashboardContainer: React.FC = () => {
   
   const [isGeneratingHandover, setIsGeneratingHandover] = useState(false);
   const [handoverText, setHandoverText] = useState<string | null>(null);
+  const [familyAppreciation, setFamilyAppreciation] = useState<{name: string, time: string} | null>(null);
+  const [offlineSyncCount, setOfflineSyncCount] = useState(0);
+
+  useEffect(() => {
+    const checkQueue = async () => {
+      const queue = await getOfflineQueue();
+      setOfflineSyncCount(queue.length);
+    };
+    checkQueue();
+    window.addEventListener('offline_queue_updated', checkQueue);
+    return () => window.removeEventListener('offline_queue_updated', checkQueue);
+  }, []);
+
+  useEffect(() => {
+    if (isOnline && offlineSyncCount > 0) {
+      // Try to sync items
+      const syncItems = async () => {
+        const queue = await getOfflineQueue();
+        if (queue.length === 0) return;
+        
+        for (const item of queue) {
+          try {
+            // Simulated sync for MVP
+            console.log("Syncing offline item:", item);
+            if (item.type === 'sirsReport') {
+              // Actual API call for sync
+              const res = await fetch("/api/sirs", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(item.data),
+              });
+              const analysis = await res.json();
+              if (analysis.error) throw new Error(analysis.error);
+              const reportInfo = analysis.result;
+              
+              await addDoc(collection(db, "sirsEvents"), {
+                priority: reportInfo.priority || 2,
+                message: reportInfo.autofillReport?.whatHappened || item.data.description || "Offline report",
+                reportInfo: reportInfo,
+                description: item.data.description || "Media report (Offline)",
+                timestamp: serverTimestamp(),
+                status: 'pending',
+                reporterName: userProfile?.name || "Offline User",
+                residentId: null
+              });
+            }
+            await removeQueueItem(item.id);
+          } catch (e) {
+            console.error("Failed to sync item", e);
+          }
+        }
+      };
+      syncItems();
+    }
+  }, [isOnline, offlineSyncCount]);
+
+  useEffect(() => {
+    if (userProfile?.role === "family") return;
+
+    // Check for family appreciation
+    const checkAppreciation = () => {
+      const stored = localStorage.getItem('family_appreciation');
+      if (stored) {
+        try {
+          const data = JSON.parse(stored);
+          // Only show if it's recent (e.g., within last 5 minutes)
+          if (Date.now() - data.timestamp < 5 * 60 * 1000) {
+            setFamilyAppreciation({
+              name: data.residentName,
+              time: new Date(data.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+            });
+            // Clear it so it only shows once
+            localStorage.removeItem('family_appreciation');
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    };
+    
+    checkAppreciation();
+    const interval = setInterval(checkAppreciation, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     let unsubResidents: () => void = () => {};
     let unsubReviews: () => void = () => {};
+    let unsubSirsEvents: () => void = () => {};
 
     try {
       if (!db) {
@@ -59,24 +152,52 @@ export const DashboardContainer: React.FC = () => {
       seedDatabaseIfNeeded();
       seedResidentsIfEmpty().catch(console.error);
 
+      // Listen for new high-priority SIRS Events
+      let isInitialSnapshot = true;
+      unsubSirsEvents = onSnapshot(
+        query(collection(db, "sirsEvents"), orderBy("timestamp", "desc"), limit(1)),
+        (snapshot) => {
+          if (isInitialSnapshot) {
+            isInitialSnapshot = false;
+            return;
+          }
+          snapshot.docChanges().forEach((change) => {
+            if (change.type === "added") {
+              const data = change.doc.data() as SIRSAlertData;
+              if (data.priority === 1) {
+                setGlobalSirsAlert(data);
+              }
+            }
+          });
+        },
+        (error) => {
+          console.error("Error fetching SIRS events: ", error);
+        }
+      );
+
       unsubResidents = subscribeResidents((data: FirestoreResident[]) => {
         const mapped: Resident[] = data.map(d => {
-          // Mock data for allergies and medical history
+          // Mock data for allergies, medical history, and medications
           let allergies: string[] = d.allergies || [];
-          let medicalHistory: string[] = [];
+          let medicalHistory: string[] = d.medicalHistory || [];
+          let medications: any[] = d.medications || [];
           
-          if (d.name === "Joyce") {
+          if (d.name.includes("Joyce")) {
             allergies = ["Penicillin", "Latex"];
             medicalHistory = ["Osteoporosis", "Type 2 Diabetes", "Previous fall with right hip fracture (2023)"];
-          } else if (d.name === "Mark") {
+            medications = [{ name: "Alendronate", dosage: "70mg", frequency: "Weekly" }];
+          } else if (d.name.includes("Chen") || d.name.includes("Mark") || d.name.includes("Arthur")) {
             allergies = ["Sulfa drugs"];
             medicalHistory = ["Hypertension", "Dementia (moderate)"];
-          } else if (d.name === "Eleanor") {
+            medications = [{ name: "Donepezil", dosage: "10mg", frequency: "Daily" }, { name: "Amlodipine", dosage: "5mg", frequency: "Daily" }];
+          } else if (d.name.includes("Eleanor") || d.name.includes("Betty")) {
             allergies = ["No known allergies"];
             medicalHistory = ["Skin tears (frequent)", "Arthritis"];
+            medications = [{ name: "Paracetamol", dosage: "500mg", frequency: "As needed for pain" }];
           } else {
              allergies = ["No known allergies"];
              medicalHistory = ["Hypertension"];
+             medications = [{ name: "Metoprolol", dosage: "50mg", frequency: "Daily" }];
           }
 
           return {
@@ -91,7 +212,8 @@ export const DashboardContainer: React.FC = () => {
             toiletStatus: d.basicCareTasks?.toilet ? "independent" : "assisted",
             avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(d.name)}&background=random`,
             allergies,
-            medicalHistory
+            medicalHistory,
+            medications
           };
         });
         setResidents(mapped);
@@ -126,8 +248,11 @@ export const DashboardContainer: React.FC = () => {
     return () => {
       unsubResidents();
       unsubReviews();
+      unsubSirsEvents();
     };
   }, []);
+
+  const [sirsInitialData, setSirsInitialData] = useState<{description?: string, sirsResult?: any}>({});
 
   const handleResidentClick = (id: string) => {
     setSelectedResidentId(id);
@@ -136,14 +261,25 @@ export const DashboardContainer: React.FC = () => {
 
   const handleSirsReport = async (data: SIRSAlertData) => {
     try {
-      await addDoc(collection(db, "sirsEvents"), {
+      const sirsEventData = {
         ...data,
         timestamp: serverTimestamp(),
-      });
+      };
+      
+      if (selectedResidentId) {
+        sirsEventData.residentId = selectedResidentId;
+      }
+      
+      await addDoc(collection(db, "sirsEvents"), sirsEventData);
+      
+      if (data.priority === 1 && selectedResidentId) {
+        await updateDoc(doc(db, "residents", selectedResidentId), {
+          status: "red"
+        });
+      }
     } catch (err) {
       console.error("Failed to save SIRS event", err);
     }
-    setGlobalSirsAlert(data);
     setCurrentScreen("dashboard"); // go back to dashboard to see the alert
   };
 
@@ -200,6 +336,8 @@ export const DashboardContainer: React.FC = () => {
     setGlobalSirsAlert(null);
   };
 
+  const [isRnCoverageLost, setIsRnCoverageLost] = useState(false);
+
   const handleGenerateHandover = async () => {
     setIsGeneratingHandover(true);
     setHandoverText(null);
@@ -227,13 +365,35 @@ export const DashboardContainer: React.FC = () => {
     }
   };
 
-  const simulateFallAlert = () => {
-    setGlobalSirsAlert({
-      id: "sim-" + Date.now(),
-      message: "Sensor Alert: Fall Detected in Room 204 (Joyce).",
-      priority: 1,
-      createdAt: new Date().toISOString()
-    });
+  const simulateFallAlert = async () => {
+    if (residents.length > 0) {
+      const resident = residents[0];
+      try {
+        await addDoc(collection(db, "sirsEvents"), {
+          id: "sim-" + Date.now(),
+          residentId: resident.id,
+          message: `🚨 IoT Sensor Alert: Fall Detected - ${resident.name} (${resident.room})`,
+          priority: 1,
+          createdAt: new Date().toISOString(),
+          timestamp: serverTimestamp(),
+          reportInfo: {
+            isReportable: true,
+            category: "Fall",
+            priority: 1,
+            autofillReport: {
+              whatHappened: "Fall detected by IoT sensor.",
+              immediateSafetyActions: "Pending...",
+              regulatorNotification: "Required within 24 hours."
+            }
+          }
+        });
+        await updateDoc(doc(db, "residents", resident.id), {
+          status: "red"
+        });
+      } catch (e) {
+        console.error("Failed to simulate fall", e);
+      }
+    }
   };
 
   if (isLoading) {
@@ -250,44 +410,86 @@ export const DashboardContainer: React.FC = () => {
   const isRN = userProfile?.role === "rn";
   const isManager = userProfile?.role === "manager";
   const isAdmin = userProfile?.role === "admin";
+  const isFamily = userProfile?.role === "family";
+
+  if (isFamily) {
+    const familyResident = residents.find(r => r.name.includes("Joyce")) || (residents.length > 0 ? residents[0] : undefined);
+    return (
+      <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
+        {!isOnline && (
+          <div className="bg-amber-100 text-amber-800 px-4 py-2 text-sm flex items-center justify-center font-medium shadow-inner">
+            <WifiOff className="w-4 h-4 mr-2" />
+            {t('offline')}
+          </div>
+        )}
+        {/* Simple Family Header */}
+        <nav className="bg-white border-b border-pink-100 select-none sticky top-0 z-50 shadow-sm">
+          <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <span className="font-normal text-pink-700 text-sm sm:text-lg tracking-tight">
+                Sunrise Family Portal
+              </span>
+            </div>
+            <div className="flex items-center gap-4">
+              <button 
+                onClick={toggleSimulateOffline}
+                title="Toggle Offline Mode"
+                className={`p-2 rounded-full flex items-center justify-center transition-colors ${!isOnline ? 'text-amber-600 bg-amber-50 hover:bg-amber-100' : 'text-slate-400 hover:bg-slate-100'}`}
+              >
+                <WifiOff className="w-5 h-5" />
+              </button>
+              <button onClick={() => logout()} className="text-slate-500 hover:text-slate-800 text-sm font-medium">
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </nav>
+        <FamilyDashboard resident={familyResident} />
+      </div>
+    );
+  }
 
   const canReviewRNQueue = isRN || isAdmin;
   const canAccessRoster = isManager || isAdmin;
-  const canLogSirs = isManager || isRN || isAdmin;
+  const canLogSirs = isCaregiver || isManager || isRN || isAdmin;
   const canDismissSirs = isManager || isAdmin;
 
-  // Filter residents for caregivers (e.g. they only see a subset they are assigned to)
-  const visibleResidents = isCaregiver
-    ? residents.filter((r) => ["1", "2", "3"].includes(r.id))
-    : residents;
+  // For local testing purposes, allow caregivers to see all residents
+  const visibleResidents = residents;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
       {!isOnline && (
         <div className="bg-amber-100 text-amber-800 px-4 py-2 text-sm flex items-center justify-center font-medium shadow-inner">
           <WifiOff className="w-4 h-4 mr-2" />
-          {t('offline')}
+          {t('offline')} 
+          {offlineSyncCount > 0 && <span className="ml-2 font-bold bg-amber-200 px-2 py-0.5 rounded-full">{offlineSyncCount} item(s) pending sync</span>}
         </div>
       )}
       {/* Top Navigation Bar */}
-      <nav className="bg-white border-b border-slate-200 select-none sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <nav className="bg-white border-b border-slate-200 select-none sticky top-0 z-50 shadow-sm">
+        <div className="max-w-[90rem] mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
           <div
-            className="flex items-center gap-2 sm:gap-3 cursor-pointer min-w-0"
+            className="flex items-center gap-3 cursor-pointer min-w-0"
             onClick={() => setCurrentScreen("dashboard")}
           >
-            <Activity className="w-5 h-5 sm:w-6 sm:h-6 text-teal-600 shrink-0" />
-            <span className="font-normal text-slate-800 text-sm sm:text-lg tracking-tight truncate">
-              Sunrise<span className="hidden sm:inline"> Care Facility</span>
+            <div className="w-10 h-10 bg-teal-600 rounded-xl flex items-center justify-center shadow-inner">
+              <Activity className="w-6 h-6 text-white shrink-0" />
+            </div>
+            <span className="font-bold text-slate-900 text-xl tracking-tight truncate hidden sm:block">
+              Sunrise Care System
+            </span>
+            <span className="font-bold text-slate-900 text-lg tracking-tight truncate sm:hidden">
+              Sunrise
             </span>
           </div>
 
-          <div className="flex items-center gap-4 sm:gap-6">
-            <div className="hidden sm:block text-xs text-right">
-              <span className="block font-medium text-slate-700">
+          <div className="flex items-center gap-4 sm:gap-8">
+            <div className="hidden sm:block text-sm text-right">
+              <span className="block font-bold text-slate-900">
                 {userProfile?.displayName}
               </span>
-              <span className="block text-slate-500 capitalize">
+              <span className="block text-slate-500 font-medium capitalize mt-0.5">
                 {userProfile?.role}
               </span>
             </div>
@@ -299,11 +501,20 @@ export const DashboardContainer: React.FC = () => {
                 <span className="ml-1 text-xs uppercase font-medium">{lang}</span>
               </button>
               <div className="absolute right-0 mt-1 w-24 bg-white rounded-lg shadow-lg border border-slate-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
-                <button onClick={() => setLang('en')} className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 \${lang === 'en' ? 'text-indigo-600 font-medium' : 'text-slate-600'}`}>English</button>
-                <button onClick={() => setLang('zh')} className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 \${lang === 'zh' ? 'text-indigo-600 font-medium' : 'text-slate-600'}`}>中文</button>
-                <button onClick={() => setLang('tl')} className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 \${lang === 'tl' ? 'text-indigo-600 font-medium' : 'text-slate-600'}`}>Tagalog</button>
+                <button onClick={() => setLang('en')} className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 ${lang === 'en' ? 'text-indigo-600 font-medium' : 'text-slate-600'}`}>English</button>
+                <button onClick={() => setLang('zh')} className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 ${lang === 'zh' ? 'text-indigo-600 font-medium' : 'text-slate-600'}`}>中文</button>
+                <button onClick={() => setLang('tl')} className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 ${lang === 'tl' ? 'text-indigo-600 font-medium' : 'text-slate-600'}`}>Tagalog</button>
               </div>
             </div>
+
+            {/* Simulated Offline Toggle */}
+            <button 
+              onClick={toggleSimulateOffline}
+              title="Toggle Offline Mode"
+              className={`p-2 rounded-full flex items-center justify-center transition-colors ${!isOnline ? 'text-amber-600 bg-amber-50 hover:bg-amber-100' : 'text-slate-400 hover:bg-slate-100'}`}
+            >
+              <WifiOff className="w-5 h-5" />
+            </button>
 
             {/* RN Notification */}
             {canReviewRNQueue && (
@@ -352,6 +563,30 @@ export const DashboardContainer: React.FC = () => {
                 </button>
               </div>
             )}
+            
+            {canDismissSirs && (
+              <button
+                onClick={() => setCurrentScreen("sirsReview")}
+                className="flex items-center gap-1.5 sm:gap-2 bg-red-50 border border-red-200 px-2 sm:px-3 py-1.5 rounded-md hover:bg-red-100 hover:border-red-300 transition-all font-sans shrink-0"
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-red-600 hidden sm:block" />
+                <span className="text-xs font-bold text-red-700">
+                  SIRS Hub
+                </span>
+              </button>
+            )}
+
+            {(isAdmin || isManager) && (
+              <button
+                onClick={() => setCurrentScreen("admin")}
+                className="flex items-center gap-1.5 sm:gap-2 bg-slate-50 border border-slate-200 px-2 sm:px-3 py-1.5 rounded-md hover:bg-slate-100 hover:border-slate-300 transition-all font-sans shrink-0 mr-2"
+              >
+                <Activity className="w-3.5 h-3.5 text-indigo-600 hidden sm:block" />
+                <span className="text-xs font-medium text-slate-700">
+                  Exec View
+                </span>
+              </button>
+            )}
 
             <button
               onClick={() => logout()}
@@ -364,56 +599,87 @@ export const DashboardContainer: React.FC = () => {
         </div>
       </nav>
 
+      {/* RN Coverage Alert */}
+      {isRnCoverageLost && (
+        <div className="bg-red-50 border-b border-red-200 py-3 px-4 sm:px-6 lg:px-8 relative z-40 flex items-center justify-center gap-3 shadow-sm animate-in fade-in slide-in-from-top-4">
+          <ShieldAlert className="w-5 h-5 text-red-600 animate-pulse shrink-0" />
+          <div className="text-red-800 text-sm font-medium">
+            <strong className="font-bold">CRITICAL ALERT:</strong> No Registered Nurse currently signed into the shift. Care teams must operate under mandatory escalation protocols.
+          </div>
+        </div>
+      )}
+
+      {/* Family Appreciation Toast */}
+      {familyAppreciation && (
+        <div className="fixed top-20 right-4 z-[90] flex justify-center p-4 animate-in slide-in-from-right-8 duration-500 fade-in pointer-events-none">
+          <div className="bg-white border-2 border-pink-200 shadow-xl rounded-2xl p-4 flex items-center gap-4 max-w-sm w-full pointer-events-auto shadow-pink-100/50">
+            <div className="w-10 h-10 rounded-full bg-pink-100 flex items-center justify-center shrink-0">
+              <span className="text-xl">💖</span>
+            </div>
+            <div className="flex-1">
+              <h3 className="font-bold text-slate-800 text-sm">Appreciation Received!</h3>
+              <p className="text-xs text-slate-600 leading-snug mt-0.5">
+                <span className="font-semibold text-pink-600">{familyAppreciation.name}'s family</span> sent appreciation for your care today.
+              </p>
+              <p className="text-[10px] text-slate-400 mt-1">{familyAppreciation.time}</p>
+            </div>
+            <button 
+              onClick={() => setFamilyAppreciation(null)}
+              className="text-slate-400 hover:text-slate-600 p-1"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Global SIRS Alert Banner */}
       {globalSirsAlert && (
-        <div
-          className={`fixed inset-0 z-[100] flex flex-col items-center justify-center p-8 animate-in zoom-in-95 duration-300 ${globalSirsAlert.priority === 1 ? "bg-red-600 text-white" : "bg-amber-100 text-amber-900"}`}
-        >
-          <ShieldAlert
-            className={`w-24 h-24 mb-6 ${globalSirsAlert.priority === 1 ? "text-white" : "text-amber-600"}`}
-          />
-          <h2
-            className={`text-4xl md:text-5xl font-bold tracking-tight text-center mb-4 uppercase ${globalSirsAlert.priority === 1 ? "text-white" : "text-amber-900"}`}
+        <div className="fixed top-0 left-0 right-0 z-[100] flex justify-center p-4 animate-in slide-in-from-top-4 duration-300 pointer-events-none">
+          <div 
+            className={`shadow-2xl rounded-xl p-4 flex items-start gap-4 max-w-2xl w-full pointer-events-auto transition-transform transform hover:scale-[1.02] active:scale-95 ${globalSirsAlert.priority === 1 ? "bg-red-600 text-white" : "bg-amber-500 text-white"}`}
           >
-            SIRS Priority {globalSirsAlert.priority} Alert
-          </h2>
-          <p
-            className={`text-xl md:text-2xl font-light text-center mb-8 max-w-2xl p-4 rounded-xl border shadow-inner ${globalSirsAlert.priority === 1 ? "bg-red-700/50 border-red-500 text-white" : "bg-amber-200/50 border-amber-300 text-amber-800"}`}
-          >
-            {globalSirsAlert.priority === 1
-              ? "Legally mandatory to report to ACQSC within 24 hours."
-              : "Report to ACQSC within 30 days."}
-          </p>
-          <div
-            className={`p-6 rounded-xl border max-w-3xl mb-12 ${globalSirsAlert.priority === 1 ? "bg-white/10 border-red-500/50" : "bg-white/50 border-amber-300"}`}
-          >
-            <p className="text-lg md:text-xl font-light text-center opacity-90 leading-relaxed text-balance">
-              {globalSirsAlert.message}
-            </p>
-          </div>
-          {canDismissSirs ? (
-            <button
-              onClick={clearAlert}
-              className={`px-8 py-4 font-bold text-lg rounded-xl shadow-2xl transition-colors transform hover:scale-105 active:scale-95 ${globalSirsAlert.priority === 1 ? "bg-white text-red-700 hover:bg-red-50" : "bg-amber-600 text-white hover:bg-amber-700"}`}
+            <ShieldAlert className="w-8 h-8 animate-pulse shrink-0 mt-1" />
+            <div 
+              className="flex-1 cursor-pointer group" 
+              onClick={() => {
+                if (globalSirsAlert.residentId) {
+                  handleResidentClick(globalSirsAlert.residentId);
+                }
+                clearAlert();
+              }}
             >
-              Manager Approve & Dismiss
+              <h3 className="font-bold text-lg">SIRS Priority {globalSirsAlert.priority} Alert</h3>
+              <p className="text-sm opacity-90 line-clamp-2">{globalSirsAlert.message}</p>
+              <div className="mt-3 inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider bg-white text-red-700 px-3 py-1.5 rounded-md shadow-sm group-hover:bg-red-50 transition-colors">
+                View Resident Profile & AI Triage <ArrowRight className="w-3 h-3" />
+              </div>
+            </div>
+            <button 
+              onClick={(e) => { e.stopPropagation(); clearAlert(); }} 
+              className="p-2 hover:bg-black/20 rounded-full transition-colors shrink-0"
+              title="Dismiss"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
             </button>
-          ) : (
-            <p className="mt-4 text-sm opacity-80">
-              (Only a Manager or Admin can dismiss this alert)
-            </p>
-          )}
+          </div>
         </div>
       )}
 
       {/* Main Content Area */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 pb-24">
+      <main className="max-w-[90rem] mx-auto px-4 sm:px-6 lg:px-8 py-8 pb-24">
         {currentScreen === "dashboard" && (
           <Dashboard
             residents={visibleResidents}
             onResidentClick={handleResidentClick}
-            onNewReport={() => setCurrentScreen("sirs")}
+            onNewReport={() => {
+              setSelectedResidentId(null);
+              setSirsInitialData({});
+              setCurrentScreen("sirs");
+            }}
             canLogSirs={canLogSirs}
+            isCaregiver={isCaregiver}
+            pendingReviews={pendingReviews}
           />
         )}
 
@@ -427,13 +693,22 @@ export const DashboardContainer: React.FC = () => {
                 addPendingReview(selectedResidentId, photoUrl, aiResult)
               }
               isCaregiver={isCaregiver}
+              onLogSirs={(description, sirsResult) => {
+                setSirsInitialData({ description, sirsResult });
+                setCurrentScreen("sirs");
+              }}
             />
           )}
 
         {currentScreen === "sirs" && canLogSirs && (
           <SirsReporter
-            onCancel={() => setCurrentScreen("dashboard")}
+            onCancel={() => {
+              setCurrentScreen("dashboard");
+              setSirsInitialData({});
+            }}
             onSubmit={handleSirsReport}
+            initialDescription={sirsInitialData.description}
+            initialSirsResult={sirsInitialData.sirsResult}
           />
         )}
 
@@ -452,16 +727,28 @@ export const DashboardContainer: React.FC = () => {
         {currentScreen === "staff" && canAccessRoster && (
           <StaffManager onBack={() => setCurrentScreen("dashboard")} />
         )}
+        
+        {currentScreen === "admin" && (isAdmin || isManager) && (
+          <AdminDashboard />
+        )}
+
+        {currentScreen === "sirsReview" && canDismissSirs && (
+          <SirsReviewDashboard onBack={() => setCurrentScreen("dashboard")} />
+        )}
       </main>
 
       {/* Mobile Floating Action Button for easy access to SIRS */}
       {currentScreen !== "sirs" && canLogSirs && (
         <button
-          onClick={() => setCurrentScreen("sirs")}
-          className="md:hidden fixed bottom-4 right-4 sm:bottom-6 sm:right-6 w-12 h-12 sm:w-14 sm:h-14 bg-red-600/90 backdrop-blur text-white rounded-full shadow-lg flex items-center justify-center hover:bg-red-700 transition-colors z-30"
+          onClick={() => {
+            setSelectedResidentId(null);
+            setSirsInitialData({});
+            setCurrentScreen("sirs");
+          }}
+          className="md:hidden fixed bottom-6 right-6 w-14 h-14 sm:w-16 sm:h-16 bg-red-600/95 backdrop-blur text-white rounded-full shadow-xl flex items-center justify-center hover:bg-red-700 transition-transform active:scale-95 z-30"
           aria-label="New Incident Report"
         >
-          <ShieldAlert className="w-5 h-5 sm:w-6 sm:h-6" />
+          <ShieldAlert className="w-6 h-6 sm:w-7 sm:h-7" />
         </button>
       )}
 
@@ -497,13 +784,20 @@ export const DashboardContainer: React.FC = () => {
         </div>
       )}
 
-      {/* Simulator Tools (For Demo/Dev only) */}
-      <div className="fixed bottom-4 left-4 z-40 opacity-30 hover:opacity-100 transition-opacity">
+      {/* Simulator Tools */}
+      <div className="fixed bottom-6 left-6 z-40 bg-white/90 backdrop-blur border border-slate-200 p-3 rounded-xl shadow-lg opacity-50 hover:opacity-100 transition-all flex flex-col gap-2">
+        <div className="text-xs font-bold text-slate-500 mb-1 px-1 uppercase tracking-wider">Simulator</div>
         <button
           onClick={simulateFallAlert}
-          className="text-[10px] bg-slate-800 text-white px-2 py-1 rounded shadow"
+          className="text-xs font-medium bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 px-3 py-2 rounded-lg transition-colors text-left"
         >
-          Dev: Trigger IoT Fall Alert
+          🚨 Trigger IoT Fall Alert
+        </button>
+        <button
+          onClick={() => setIsRnCoverageLost(prev => !prev)}
+          className="text-xs font-medium bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 px-3 py-2 rounded-lg transition-colors text-left"
+        >
+          ⚠️ Toggle RN Coverage Alert
         </button>
       </div>
 

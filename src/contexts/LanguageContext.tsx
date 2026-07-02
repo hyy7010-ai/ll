@@ -58,14 +58,16 @@ const LanguageContext = createContext<{
   setLang: (lang: Language) => void;
   t: (key: keyof typeof translations.en) => string;
   isOnline: boolean;
-}>({ lang: 'en', setLang: () => {}, t: (k) => k, isOnline: true });
+  toggleSimulateOffline: () => void;
+}>({ lang: 'en', setLang: () => {}, t: (k) => k, isOnline: true, toggleSimulateOffline: () => {} });
 
 export const LanguageProvider = ({ children }: { children: React.ReactNode }) => {
   const [lang, setLang] = useState<Language>('en');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [simulateOffline, setSimulateOffline] = useState(false);
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
+    const handleOnline = () => { if (!simulateOffline) setIsOnline(true); };
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -73,12 +75,22 @@ export const LanguageProvider = ({ children }: { children: React.ReactNode }) =>
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
+  }, [simulateOffline]);
+
+  useEffect(() => {
+    if (simulateOffline) {
+      setIsOnline(false);
+    } else {
+      setIsOnline(navigator.onLine);
+    }
+  }, [simulateOffline]);
+
+  const toggleSimulateOffline = () => setSimulateOffline(prev => !prev);
 
   const t = (key: keyof typeof translations.en) => translations[lang][key] || translations.en[key];
 
   return (
-    <LanguageContext.Provider value={{ lang, setLang, t, isOnline }}>
+    <LanguageContext.Provider value={{ lang, setLang, t, isOnline, toggleSimulateOffline }}>
       {children}
     </LanguageContext.Provider>
   );

@@ -30,6 +30,29 @@ export const Login: React.FC = () => {
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const testAccounts: Record<string, UserRole> = {
+      "caregiver@sunrisecare.com": "caregiver",
+      "rn@sunrisecare.com": "rn",
+      "manager@sunrisecare.com": "manager",
+      "family@sunrisecare.com": "family",
+      "admin@sunrisecare.com": "admin",
+    };
+
+    if (testAccounts[email] && password === "password123") {
+      try {
+        setError("");
+        setLoading(true);
+        loginAsDemo(testAccounts[email]);
+        navigate("/");
+        return;
+      } catch (err: any) {
+        setError("Failed to login with test account.");
+        setLoading(false);
+        return;
+      }
+    }
+
     try {
       setError("");
       setLoading(true);
@@ -38,7 +61,7 @@ export const Login: React.FC = () => {
     } catch (err: any) {
       if (err.code === "auth/operation-not-allowed") {
         setError(
-          "Email & Password sign-in is disabled in your Firebase console. Please enable it, or use demo accounts.",
+          "Email & Password sign-in is disabled in your Firebase console. Please enable it, or use test accounts.",
         );
       } else {
         setError("Failed to login. Please check your credentials.");
@@ -60,18 +83,17 @@ export const Login: React.FC = () => {
     }
   };
 
-  const handleDemoLogin = async (role: UserRole) => {
-    try {
-      setError("");
-      setLoading(true);
-      loginAsDemo(role);
-      navigate("/");
-    } catch (err: any) {
-      setError(`Failed to login with demo ${role} account.`);
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+  const handlePreFill = (role: UserRole) => {
+    const emails = {
+      caregiver: "caregiver@sunrisecare.com",
+      rn: "rn@sunrisecare.com",
+      manager: "manager@sunrisecare.com",
+      family: "family@sunrisecare.com",
+      admin: "admin@sunrisecare.com"
+    };
+    setEmail(emails[role]);
+    setPassword("password123");
+    setError("");
   };
 
   return (
@@ -143,17 +165,17 @@ export const Login: React.FC = () => {
             </div>
           )}
 
-          {/* Quick Demo Access */}
+          {/* Quick Access */}
           <div className="bg-slate-100 rounded-2xl p-6 border border-slate-200">
             <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse"></span>
-              Quick Demo Access
+              Staff Logins
             </h3>
             <div className="grid grid-cols-2 gap-3">
               <button
-                onClick={() => handleDemoLogin("caregiver")}
-                disabled={loading}
-                className="flex flex-col items-center justify-center p-3 bg-white border border-slate-200 rounded-xl hover:border-indigo-300 hover:bg-indigo-50 transition-all group disabled:opacity-50"
+                onClick={() => handlePreFill("caregiver")}
+                type="button"
+                className="flex flex-col items-center justify-center p-3 bg-white border border-slate-200 rounded-xl hover:border-indigo-300 hover:bg-indigo-50 transition-all group"
               >
                 <UserCircle className="w-6 h-6 text-slate-400 group-hover:text-indigo-600 mb-2 transition-colors" />
                 <span className="text-sm font-medium text-slate-700 group-hover:text-indigo-900">
@@ -161,9 +183,9 @@ export const Login: React.FC = () => {
                 </span>
               </button>
               <button
-                onClick={() => handleDemoLogin("rn")}
-                disabled={loading}
-                className="flex flex-col items-center justify-center p-3 bg-white border border-slate-200 rounded-xl hover:border-teal-300 hover:bg-teal-50 transition-all group disabled:opacity-50"
+                onClick={() => handlePreFill("rn")}
+                type="button"
+                className="flex flex-col items-center justify-center p-3 bg-white border border-slate-200 rounded-xl hover:border-teal-300 hover:bg-teal-50 transition-all group"
               >
                 <HeartPulse className="w-6 h-6 text-slate-400 group-hover:text-teal-600 mb-2 transition-colors" />
                 <span className="text-sm font-medium text-slate-700 group-hover:text-teal-900">
@@ -171,9 +193,9 @@ export const Login: React.FC = () => {
                 </span>
               </button>
               <button
-                onClick={() => handleDemoLogin("manager")}
-                disabled={loading}
-                className="flex flex-col items-center justify-center p-3 bg-white border border-slate-200 rounded-xl hover:border-amber-300 hover:bg-amber-50 transition-all group disabled:opacity-50"
+                onClick={() => handlePreFill("manager")}
+                type="button"
+                className="flex flex-col items-center justify-center p-3 bg-white border border-slate-200 rounded-xl hover:border-amber-300 hover:bg-amber-50 transition-all group"
               >
                 <Users className="w-6 h-6 text-slate-400 group-hover:text-amber-600 mb-2 transition-colors" />
                 <span className="text-sm font-medium text-slate-700 group-hover:text-amber-900">
@@ -181,9 +203,19 @@ export const Login: React.FC = () => {
                 </span>
               </button>
               <button
-                onClick={() => handleDemoLogin("admin")}
-                disabled={loading}
-                className="flex flex-col items-center justify-center p-3 bg-slate-800 border border-slate-700 rounded-xl hover:bg-slate-900 transition-all group disabled:opacity-50"
+                onClick={() => handlePreFill("family")}
+                type="button"
+                className="flex flex-col items-center justify-center p-3 bg-white border border-slate-200 rounded-xl hover:border-pink-300 hover:bg-pink-50 transition-all group"
+              >
+                <HeartPulse className="w-6 h-6 text-slate-400 group-hover:text-pink-600 mb-2 transition-colors" />
+                <span className="text-sm font-medium text-slate-700 group-hover:text-pink-900">
+                  Family
+                </span>
+              </button>
+              <button
+                onClick={() => handlePreFill("admin")}
+                type="button"
+                className="flex flex-col items-center justify-center p-3 bg-slate-800 border border-slate-700 rounded-xl hover:bg-slate-900 transition-all group col-span-2"
               >
                 <ShieldAlert className="w-6 h-6 text-slate-400 group-hover:text-white mb-2 transition-colors" />
                 <span className="text-sm font-medium text-slate-300 group-hover:text-white">

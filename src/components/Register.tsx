@@ -41,7 +41,7 @@ export const Register: React.FC = () => {
         setError("Email is already in use.");
       } else if (err.code === "auth/operation-not-allowed") {
         setError(
-          "Email & Password registration is disabled. Please enable it in Firebase console, or use the quick demo access on the login page.",
+          "Email & Password registration is disabled. Please contact your system administrator to enable it, or use the staff logins on the login page.",
         );
       } else {
         setError("Failed to create an account: " + err.message);
@@ -122,7 +122,7 @@ export const Register: React.FC = () => {
               <option value="admin">Administrator</option>
             </select>
             <p className="text-xs text-slate-500 mt-1">
-              For demo purposes, you can select your own role.
+              Initial role assignment (can be changed by Admin later).
             </p>
           </div>
           <button

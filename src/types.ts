@@ -1,4 +1,4 @@
-export type UserRole = "caregiver" | "rn" | "manager" | "admin";
+export type UserRole = "caregiver" | "rn" | "manager" | "admin" | "family";
 
 export interface UserProfile {
   uid: string;
@@ -25,6 +25,7 @@ export interface Resident {
   careMinutesTarget: number;
   allergies?: string[];
   medicalHistory?: string[];
+  medications?: { name: string; dosage: string; frequency: string }[];
 }
 
 export interface AIObservationResult {
@@ -42,6 +43,8 @@ export interface SIRSReport {
   isReportable: boolean;
   category: string;
   priority: 1 | 2 | null;
+  incidentTitle?: string;
+  residentName?: string;
   autofillReport: {
     whatHappened: string;
     immediateSafetyActions: string;
@@ -59,6 +62,7 @@ export interface SIRSAlertData {
   priority: 1 | 2;
   message: string;
   reportInfo: SIRSReport;
+  residentId?: string;
 }
 
 export interface PendingReview {

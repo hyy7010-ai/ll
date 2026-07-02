@@ -36,7 +36,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const [demoProfile, setDemoProfile] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem("demoProfile");
-      return saved ? JSON.parse(saved) : null;
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Patch old Demo names
+        if (parsed.displayName === "Demo RN") parsed.displayName = "Emily Chen";
+        if (parsed.displayName === "Demo Caregiver") parsed.displayName = "Sarah Jenkins";
+        if (parsed.displayName === "Demo Manager") parsed.displayName = "Michael Thompson";
+        if (parsed.displayName === "Demo Admin") parsed.displayName = "System Admin";
+        
+        // Save back the patched version
+        localStorage.setItem("demoProfile", JSON.stringify(parsed));
+        return parsed;
+      }
+      return null;
     } catch (e) {
       return null;
     }
@@ -92,15 +104,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const loginAsDemo = (role: UserRole) => {
     const nameMap = {
-      caregiver: "Demo Caregiver",
-      rn: "Demo RN",
-      manager: "Demo Manager",
-      admin: "Demo Admin",
+      caregiver: "Sarah Jenkins",
+      rn: "Emily Chen",
+      manager: "Michael Thompson",
+      admin: "System Admin",
     };
     const profile: UserProfile = {
-      uid: `demo-${role}`,
-      email: `${role}@demo.com`,
-      displayName: nameMap[role],
+      uid: `local-${role}`,
+      email: `${role}@sunrisecare.com`,
+      displayName: nameMap[role as keyof typeof nameMap] || "Guest",
       role: role,
     };
     localStorage.setItem("demoProfile", JSON.stringify(profile));

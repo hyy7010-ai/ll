@@ -51,6 +51,8 @@ export interface FirestoreResident {
   careMinutes: number;
   status: string;
   allergies: string[];
+  medicalHistory?: string[];
+  medications?: { name: string; dosage: string; frequency: string }[];
   basicCareTasks: {
     bath: boolean;
     meal: boolean;
@@ -124,7 +126,11 @@ export function subscribeResidents(callback: (residents: FirestoreResident[]) =>
   );
 }
 
+let isSeeding = false;
+
 export async function seedResidentsIfEmpty(onError?: (e: Error) => void) {
+  if (isSeeding) return;
+  isSeeding = true;
   try {
     const existing = await getResidents();
     if (existing.length === 0) {
@@ -149,5 +155,7 @@ export async function seedResidentsIfEmpty(onError?: (e: Error) => void) {
   } catch (error) {
     console.error("Error seeding residents:", error);
     if (onError) onError(error as Error);
+  } finally {
+    isSeeding = false;
   }
 }

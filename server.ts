@@ -137,14 +137,18 @@ async function startServer() {
         
         1. Translate and interpret the core events described.
         2. Transform the raw description into a highly professional, clinical, and objective aged care progress note.
-        3. Use standard clinical terminology (e.g., "Resident exhibited initial behavioral resistance...", "Skin intact", "Verbally redirected").
+        3. Use standard clinical terminology.
         4. Remove all conversational filler. Focus purely on facts, interventions, and outcomes.
         
         CRITICAL TASK: Detect the language spoken in the audio recording. If it is NOT English (e.g. it is Mandarin, Tagalog, etc.), translate the final English note back into that detected language as a 'nativeConfirmation' so the carer can verify the record. If the audio is in English, leave it empty.
         
+        SIRS ASSESSMENT: Analyze if the described event constitutes a Serious Incident Response Scheme (SIRS) reportable incident (e.g., fall with injury, unexplained absence, unreasonable use of force). 
+        If it does, extract the required SIRS fields.
+        
         Return your response in structured JSON format with these exact keys:
         - englishNote: string (the professional progress note in English, plain text without markdown)
         - nativeConfirmation: string (the translated confirmation in the carer's native language, or empty if English)
+        - sirsAssessment: object or null. If reportable, provide: { isReportable: true, category: string, priority: number (1 or 2), incidentTitle: string, autofillReport: { whatHappened: string, immediateSafetyActions: string, regulatorNotification: string } }. If not reportable, set to null.
       `;
 
       const response = await generateWithRetry({
@@ -188,14 +192,14 @@ async function startServer() {
   // API Route: SIRS Incident Reporter
   app.post('/api/sirs', async (req, res) => {
     try {
-      const { description } = req.body;
-      if (!description) {
-        return res.status(400).json({ error: 'Incident description is required' });
+      const { description, audioBase64, imageBase64 } = req.body;
+      if (!description && !audioBase64 && !imageBase64) {
+        return res.status(400).json({ error: 'Incident description, audio, or image is required' });
       }
 
-      const prompt = `
+      let prompt = `
         You are an AI assistant in an Australian aged care facility.
-        Review the following incident description: "${description}"
+        Review the following incident description: "${description || 'No text description provided. Please rely on the provided audio/image.'}"
         Reason about Australia's Serious Incident Response Scheme (SIRS) rules.
         
         CRITICAL TASK: First, use your Google Search tool to retrieve the most up-to-date guidelines from the "Aged Care Quality and Safety Commission (ACQSC) Serious Incident Response Scheme (SIRS)", specifically focusing on reportable incident categories and the reporting timeframes for Priority 1 and Priority 2 incidents.
@@ -217,6 +221,8 @@ async function startServer() {
         - isReportable: boolean
         - category: string (the aligned SIRS category)
         - priority: number (1 or 2, default to null if not reportable)
+        - incidentTitle: string (a short, clear 3-6 word title summarizing the incident)
+        - residentName: string (the name of the resident involved, if mentioned; otherwise "Unknown Resident")
         - autofillReport: An object with the following keys:
           - whatHappened: string
           - immediateSafetyActions: string
@@ -232,11 +238,35 @@ async function startServer() {
         You MUST return ONLY valid JSON. Do NOT wrap your response in markdown code blocks (e.g., do not use \`\`\`json). Return just the raw JSON object.
       `;
 
+      const parts: any[] = [{ text: prompt }];
+
+      if (audioBase64) {
+        // Strip data URI prefix if present
+        const base64Data = audioBase64.replace(/^data:audio\/\w+;base64,/, "");
+        parts.push({
+          inlineData: {
+            mimeType: "audio/webm",
+            data: base64Data
+          }
+        });
+      }
+
+      if (imageBase64) {
+        // Strip data URI prefix if present
+        const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
+        parts.push({
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: base64Data
+          }
+        });
+      }
+
       const response = await generateWithRetry({
         model: 'gemini-2.5-flash',
-        contents: prompt,
+        contents: { parts },
+        tools: [{ googleSearch: {} }],
         config: {
-          tools: [{ googleSearch: {} }],
           temperature: 0.2
         }
       });
@@ -399,6 +429,48 @@ async function startServer() {
     } catch (error: any) {
       console.error('Handover API Error:', error);
       let errorMsg = error.message || 'Failed to generate handover.';
+      if (errorMsg.includes('429') || errorMsg.includes('quota') || errorMsg.includes('RESOURCE_EXHAUSTED')) {
+        errorMsg = 'AI API rate limit (quota) exceeded. Please wait a moment and try again.';
+      }
+      res.status(500).json({ error: errorMsg });
+    }
+  });
+
+  app.post('/api/generate-family-update', async (req, res) => {
+    try {
+      const { resident, careNotes } = req.body;
+      const ai = getAi();
+
+      const prompt = `
+        You are a compassionate aged care communication assistant.
+        Your task is to generate a short, warm, and HIPAA-compliant family update message.
+        
+        Resident Profile:
+        Name: ${resident.name}
+        Current Status: ${resident.statusColor} (green=stable, amber=needs monitoring, red=critical)
+        Care Minutes Provided Today: ${resident.careMinutesToday}
+        
+        Recent Care Notes/Events:
+        ${careNotes ? careNotes : 'Routine care provided.'}
+        
+        Guidelines:
+        - NEVER include specific medical diagnoses, exact vital signs, medication names, or names of other residents.
+        - Strip out any raw clinical jargon.
+        - Tone must be warm, reassuring, and professional.
+        - The message will be translated into the family's native language on the frontend, so use clear, simple English.
+        - Start directly with the message (e.g., "Hello family, ...") and end with "Warm regards, Sunrise Care Team".
+        - Do not output JSON, just output the plain text message.
+      `;
+
+      const response = await generateWithRetry({
+        model: 'gemini-2.5-flash',
+        contents: prompt
+      });
+
+      res.json({ result: response.text || '' });
+    } catch (error: any) {
+      console.error('Family Update API Error:', error);
+      let errorMsg = error.message || 'Failed to generate family update.';
       if (errorMsg.includes('429') || errorMsg.includes('quota') || errorMsg.includes('RESOURCE_EXHAUSTED')) {
         errorMsg = 'AI API rate limit (quota) exceeded. Please wait a moment and try again.';
       }
